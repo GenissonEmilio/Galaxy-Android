@@ -529,7 +529,8 @@ void StarPointerLayout::calcAnim() {
 }
 
 void StarPointerLayout::draw() const {
-    if (!isAppear()) {
+    // The number is a separate layout: never draw a disconnected channel's decoration, even before its hide animation runs.
+    if (!isAppear() || !MR::isConnectedInput(mPadChannel)) {
         mBlur->hideAll();
         return;
     }

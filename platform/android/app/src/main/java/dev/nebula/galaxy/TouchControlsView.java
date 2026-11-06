@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package dev.nebula.galaxy;
 
+import android.app.AlertDialog;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Insets;
@@ -8,11 +9,15 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Typeface;
-import android.os.SystemClock;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.WindowInsets;
+import android.widget.CheckBox;
+import android.widget.LinearLayout;
+import android.widget.SeekBar;
+import android.widget.TextView;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -20,8 +25,8 @@ import java.util.List;
 
 /**
  * The on-screen Wii Remote and Nunchuk over the picture. Every touch comes here: a finger that lands on a control
- * presses it (and may slide on to the next), the first finger on the left side of the picture is a floating stick
- * (on a pointer screen, only on the stick's circle), and any other finger is the pointer.
+ * keeps its role until released. Movement, Wii pointing and action buttons can be held together. The visible
+ * POINTER/CAM switch changes only new picture gestures; CAM sends the original game's D-pad camera steps.
  */
 final class TouchControlsView extends View {
     // As platform/sdl/sdl_host.h's TouchButton.
@@ -29,6 +34,11 @@ final class TouchControlsView extends View {
             HOME = 1 << 7, ONE = 1 << 8, TWO = 1 << 9, UP = 1 << 10, DOWN = 1 << 11, LEFT = 1 << 12, RIGHT = 1 << 13;
 
     interface Listener {
+        /** Reveal automatic touch controls before assigning this gesture to a role. */
+        void touchStarted();
+
+        /** Camera options own the picture until dismissed; the Activity pauses only while it is foreground. */
+        void cameraDialogChanged(boolean open);
         /** The held buttons and the stick (-1..1, up positive) changed. */
         void onControls(int buttons, float stickX, float stickY);
 
@@ -52,11 +62,13 @@ final class TouchControlsView extends View {
 
     // What each finger (by pointer id, 0..31) landed on: a button's index or one of these. Arrays, so a touch
     // allocates nothing.
-    private static final int MAX_POINTERS = 32;
-    private static final int TARGET_NONE = -100;
-    private static final int TARGET_STICK = -1;
-    private static final int TARGET_POINTER = -2;
-    private static final int TARGET_DPAD = -3;
+    private static final int MAX_POINTERS = TouchInputModel.COUNT;
+    private static final int TARGET_NONE = TouchInputModel.NONE;
+    private static final int TARGET_STICK = TouchInputModel.STICK;
+    private static final int TARGET_POINTER = TouchInputModel.POINTER;
+    private static final int TARGET_DPAD = TouchInputModel.DPAD;
+    private static final int TARGET_CAMERA = TouchInputModel.CAMERA;
+    private static final int TARGET_MODE = TouchInputModel.MODE;
     private static final float STICK_DEAD_ZONE = 0.06f;
     // Places in `buttons`.
     private static final int HOME_BUTTON = 6;
@@ -85,17 +97,19 @@ final class TouchControlsView extends View {
     private final Listener listener;
     private final float dp;
     private final List<Button> buttons = new ArrayList<>();
-    private final int[] targets = new int[MAX_POINTERS];
-    private final int[] pointerBits = new int[MAX_POINTERS];  // the buttons each finger holds
-    private final boolean[] zLeft = new boolean[MAX_POINTERS];
-    private final boolean[] zQuick = new boolean[MAX_POINTERS];
-    private final long[] zDownMs = new long[MAX_POINTERS];
-    private static final long Z_QUICK_SLIDE_MS = 180;
-    private static final float Z_QUICK_SLIDE_STICK = 0.3f;
+    private final TouchInputModel input = new TouchInputModel();
+    private final float[] stickValue = new float[2];
+    private final float[] lastX = new float[MAX_POINTERS], lastY = new float[MAX_POINTERS];
+    private final RectF aimMode = new RectF();
+    private boolean cameraMode;
+    private TouchLayouts.CameraSettings cameraSettings;
+    private AlertDialog cameraDialog;
+    private final Runnable cameraOptions = this::openCameraSettings;
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint.FontMetrics fontMetrics = new Paint.FontMetrics();
     private final Path path = new Path();
     private final RectF rect = new RectF();
 
@@ -138,6 +152,7 @@ final class TouchControlsView extends View {
         super(context);
         this.listener = listener;
         layouts = new TouchLayouts(context);
+        cameraSettings = layouts.loadCamera();
         dp = context.getResources().getDisplayMetrics().density;
         buttons.add(new Button(A, "A", false, false));
         buttons.add(new Button(B, "B", false, false));
@@ -149,7 +164,6 @@ final class TouchControlsView extends View {
         buttons.add(new Button(PLUS, "+", false, false));
         buttons.add(new Button(ONE, "1", false, false));
         buttons.add(new Button(TWO, "2", false, false));
-        Arrays.fill(targets, TARGET_NONE);
         stroke.setStyle(Paint.Style.STROKE);
         line.setStyle(Paint.Style.STROKE);
         line.setStrokeCap(Paint.Cap.ROUND);
@@ -167,7 +181,6 @@ final class TouchControlsView extends View {
         invalidate();
     }
 
-    /** Shown or hidden (hidden: every finger is the pointer). Hiding releases whatever was held. */
     /** The game went to or from a pointer screen (GameActivity.menuContextChanged). */
     void syncMenuContext() {
         final boolean menu = listener.menuContext();
@@ -176,14 +189,7 @@ final class TouchControlsView extends View {
         }
         pointerScreen = menu;
         placeHome();
-        for (int i = 0; i < MAX_POINTERS; ++i) {
-            if (targets[i] != TARGET_POINTER) {
-                targets[i] = TARGET_NONE;
-            }
-        }
-        Arrays.fill(pointerBits, 0);
-        stickPointer = -1;
-        publish(0, 0.0f, 0.0f);
+        cancelTouches();
         invalidate();
     }
 
@@ -208,21 +214,13 @@ final class TouchControlsView extends View {
             return;
         }
         shown = value;
-        if (!value) {
-            for (int i = 0; i < MAX_POINTERS; ++i) {
-                if (targets[i] != TARGET_POINTER) {
-                    targets[i] = TARGET_NONE;
-                }
-            }
-            Arrays.fill(pointerBits, 0);
-            stickPointer = -1;
-            publish(0, 0.0f, 0.0f);
-        }
+        cancelTouches();
         invalidate();
     }
 
     @Override
     public WindowInsets onApplyWindowInsets(WindowInsets insets) {
+        cancelTouches();
         safe = insets.getInsetsIgnoringVisibility(WindowInsets.Type.displayCutout() | WindowInsets.Type.systemGestures());
         layoutControls(getWidth(), getHeight());
         return insets;
@@ -230,6 +228,7 @@ final class TouchControlsView extends View {
 
     @Override
     protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
+        cancelTouches();
         layoutControls(width, height);
     }
 
@@ -268,7 +267,7 @@ final class TouchControlsView extends View {
         final Button a = buttons.get(0);
         a.radius = ra;
         a.x = right - ra;
-        a.y = bottom - ra;
+        a.y = TouchLayouts.galaxyActionY(width, height, bottom - ra, ra, u, dp);
         final float reach = ra + rs + 14 * u;
         placeOnArc(buttons.get(2), a, reach, 98, rs);   // Spin
         placeOnArc(buttons.get(1), a, reach, 142, rs);  // B
@@ -276,8 +275,9 @@ final class TouchControlsView extends View {
         // C above the arc, at the edge.
         final Button c = buttons.get(4);
         c.radius = 24 * u;
-        c.x = right - c.radius;
-        c.y = a.y - reach - rs - 34 * u;
+        // C sits inward of LIFE, leaving the raised Spin button room below it.
+        c.x = width > height ? width * 0.815f : right - c.radius;
+        c.y = width > height ? height * 0.34f : a.y - reach - rs - 34 * u;
 
         // The small buttons: - HOME + at the top centre, 1 2 at the top right (a row lower where the screen is too
         // narrow for both).
@@ -290,10 +290,19 @@ final class TouchControlsView extends View {
         final float row12 = cx + 4.2f * rm > right - 4.4f * rm ? row + 2.8f * rm : row;
         place(buttons.get(9), right - rm, row12, rm);
         place(buttons.get(8), right - 3.4f * rm, row12, rm);
+        // Keep the optional 1/2 and minus in saved layouts and Arrange, but leave the playing picture light.
+        aimMode.set(right - 100 * u, top, right, top + 38 * u);
+        if (width > height) {
+            // The real game HUD reserves the far right: place the switch inward, around (2000,220) at 2772x1280.
+            final float modeX = TouchInputModel.clampCenter(width * 0.72f, 50 * u, left, right);
+            final float modeY = TouchInputModel.clampCenter(height * 0.172f, 19 * u,
+                    Math.max(safe.top, 0), height - Math.max(safe.bottom, 0));
+            aimMode.set(modeX - 50 * u, modeY - 19 * u, modeX + 50 * u, modeY + 19 * u);
+        }
 
         // The stick at the bottom left; the D-pad at the top left, or on a tall screen (a phone upright, the Fold
         // open) just above the stick, where the thumb reaches it.
-        dpadRadius = 46 * u;
+        dpadRadius = 32 * u;
         stickRadius = 62 * u;
         stickRestX = left + stickRadius + 10 * u;
         stickRestY = bottom - stickRadius;
@@ -337,7 +346,7 @@ final class TouchControlsView extends View {
     }
 
     private static float onScreen(float at, float radius, int size) {
-        return Math.max(radius, Math.min(size - radius, at));
+        return TouchInputModel.clampCenter(at, radius, 0, size);
     }
 
     private void reportSettings() {
@@ -346,6 +355,7 @@ final class TouchControlsView extends View {
 
     /** From General's rows. */
     void applySettings(int sizePercent, int opacityPercent, boolean vibrate) {
+        cancelTouches();
         layout.size = sizePercent == 0 ? Float.NaN : Math.max(SIZE_MIN, Math.min(SIZE_MAX, sizePercent / 100.0f));
         layouts.save(layoutKey, layout);
         opacity = Math.max(0.2f, Math.min(1.0f, opacityPercent / 100.0f));
@@ -357,6 +367,7 @@ final class TouchControlsView extends View {
 
     /** From General's row: every control back where the game puts it on this shape of screen. */
     void resetPlaces() {
+        cancelTouches();
         Arrays.fill(layout.x, Float.NaN);
         Arrays.fill(layout.y, Float.NaN);
         layouts.save(layoutKey, layout);
@@ -367,15 +378,12 @@ final class TouchControlsView extends View {
     // Arranging the controls: the icons can be dragged, OK locks them in. Nothing else answers. Saved for this shape of
     // screen.
     void startArranging() {
+        cancelTouches();
         arranging = true;
         selected = -1;
         dragPointer = -1;
         okPointer = -1;
         // A finger or button held when this began lets go.
-        Arrays.fill(targets, TARGET_NONE);
-        Arrays.fill(pointerBits, 0);
-        stickPointer = -1;
-        publish(0, 0.0f, 0.0f);
         layoutOk(getWidth(), getHeight());
         invalidate();
     }
@@ -385,6 +393,7 @@ final class TouchControlsView extends View {
     }
 
     void finishArranging() {
+        dragPointer = okPointer = -1;
         arranging = false;
         selected = -1;
         layouts.save(layoutKey, layout);
@@ -447,6 +456,11 @@ final class TouchControlsView extends View {
     // One finger at a time moves an icon or presses OK; any other touch is nothing.
     private void arrangeEvent(MotionEvent event) {
         final int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_CANCEL) {
+            dragPointer = okPointer = -1;
+            invalidate();
+            return;
+        }
         final int index = event.getActionIndex();
         final int id = event.getPointerId(index);
         switch (action) {
@@ -533,7 +547,8 @@ final class TouchControlsView extends View {
         text.setTextSize(21 * dp);
         text.setColor(0xFF1B1600);
         text.setAlpha(255);
-        final Paint.FontMetrics metrics = text.getFontMetrics();
+        text.getFontMetrics(fontMetrics);
+        final Paint.FontMetrics metrics = fontMetrics;
         canvas.drawText(getContext().getString(R.string.arrange_ok), ok.centerX(), ok.centerY() - (metrics.ascent + metrics.descent) / 2.0f, text);
         text.setTextSize(savedSize);
     }
@@ -551,6 +566,11 @@ final class TouchControlsView extends View {
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            // A fresh gesture also heals an interrupted stream whose CANCEL was lost by a parent/window.
+            cancelTouches();
+            if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
+        }
         if (arranging) {
             arrangeEvent(event);
             return true;
@@ -575,9 +595,7 @@ final class TouchControlsView extends View {
             break;
         }
         case MotionEvent.ACTION_CANCEL:
-            for (int i = 0; i < event.getPointerCount(); ++i) {
-                up(event.getPointerId(i), event.getX(i), event.getY(i));
-            }
+            cancelTouches();
             break;
         default:
             break;
@@ -589,15 +607,18 @@ final class TouchControlsView extends View {
         if (id < 0 || id >= MAX_POINTERS) {
             return;
         }
+        listener.touchStarted();
         int target = TARGET_POINTER;
         syncMenuContext();
         if (shown) {
             final int button = buttonAt(x, y);
-            if (button >= 0) {
+            if (!pointerScreen && !listener.titleScreen() && aimMode.contains(x, y)) {
+                target = TARGET_MODE;
+            } else if (button >= 0) {
                 target = button;
             } else if (pointerScreen) {
                 target = TARGET_POINTER;
-            } else if (listener.touchTarget(x, y)) {
+            } else if (!cameraMode && listener.touchTarget(x, y)) {
                 target = TARGET_POINTER;
             } else if (dpadBits(x, y) != 0 || Math.hypot(x - dpadX, y - dpadY) <= dpadRadius * 1.2f) {
                 target = TARGET_DPAD;
@@ -605,28 +626,37 @@ final class TouchControlsView extends View {
                 target = TARGET_STICK;
                 stickPointer = id;
                 // The stick centres under the thumb, kept whole on the screen.
-                stickBaseX = Math.min(Math.max(x, stickRadius + Math.max(safe.left, 0) + 8 * dp),
-                        getWidth() - stickRadius - Math.max(safe.right, 0) - 8 * dp);
-                stickBaseY = Math.min(y, getHeight() - Math.max(safe.bottom, 0) - stickRadius - 8 * dp);
+                stickBaseX = TouchInputModel.clampCenter(x, stickRadius,
+                        Math.max(safe.left, 0) + 8 * dp, getWidth() - Math.max(safe.right, 0) - 8 * dp);
+                stickBaseY = TouchInputModel.clampCenter(y, stickRadius,
+                        Math.max(safe.top, 0) + 8 * dp, getHeight() - Math.max(safe.bottom, 0) - 8 * dp);
                 stickKnobX = x;
                 stickKnobY = y;
+            } else if (!listener.titleScreen() && cameraMode) {
+                target = TARGET_CAMERA;
             }
         }
-        targets[id] = target;
+        if (!input.claim(id, target, x, y)) return;
+        lastX[id] = x;
+        lastY[id] = y;
+        input.motion(id, x, y);
         if (target == TARGET_POINTER) {
             listener.onPointer(0, id, x, y);
             return;
         }
-        zLeft[id] = false;
-        zDownMs[id] = SystemClock.uptimeMillis();
+        if (target == TARGET_MODE) postDelayed(cameraOptions, ViewConfiguration.getLongPressTimeout());
         update(id, x, y);
     }
 
     private void move(int id, float x, float y) {
-        final int target = id >= 0 && id < MAX_POINTERS ? targets[id] : TARGET_NONE;
+        final int target = input.role(id);
         if (target == TARGET_NONE) {
             return;
         }
+        lastX[id] = x;
+        lastY[id] = y;
+        input.motion(id, x, y);
+        if (target == TARGET_MODE && !input.isTap(id, 24 * dp)) removeCallbacks(cameraOptions);
         if (target == TARGET_POINTER) {
             listener.onPointer(1, id, x, y);
             return;
@@ -635,16 +665,23 @@ final class TouchControlsView extends View {
     }
 
     private void up(int id, float x, float y) {
-        final int target = id >= 0 && id < MAX_POINTERS ? targets[id] : TARGET_NONE;
+        final int target = input.role(id);
         if (target == TARGET_NONE) {
             return;
         }
-        targets[id] = TARGET_NONE;
+        input.motion(id, x, y);
+        input.release(id);
+        if (target == TARGET_MODE) {
+            removeCallbacks(cameraOptions);
+            if (aimMode.contains(x, y) && input.isTap(id, 24 * dp)) {
+                cameraMode = !cameraMode;
+                invalidate();
+            }
+        }
         if (target == TARGET_POINTER) {
             listener.onPointer(2, id, x, y);
             return;
         }
-        pointerBits[id] = 0;
         if (target == TARGET_STICK) {
             stickPointer = -1;
         }
@@ -653,58 +690,33 @@ final class TouchControlsView extends View {
 
     // A control finger moved or landed: what it holds now.
     private void update(int id, float x, float y) {
-        final int target = targets[id];
+        final int target = input.role(id);
         int bits = 0;
         if (target == TARGET_STICK) {
             stickKnobX = x;
             stickKnobY = y;
         } else if (target == TARGET_DPAD) {
             bits = dpadBits(x, y);
-        } else {
-            // A button finger slides: it holds the button it is over, if any.
-            final int over = buttonAt(x, y);
-            bits = over >= 0 ? buttons.get(over).bit : 0;
-            if (target >= 0 && target < buttons.size() && buttons.get(target).bit == Z) {
-                bits = slideFromZ(id, over, bits);
-            }
+        } else if (target == TARGET_CAMERA) {
+            bits = TouchInputModel.cameraDirection(input.dx(id, x), input.dy(id, y), cameraSettings.thresholdDp() * dp,
+                    cameraSettings.invertX, cameraSettings.invertY);
+        } else if (target >= 0 && target < buttons.size()) {
+            // Only the button this finger started on can answer it; crossing the picture never grabs another role.
+            final Button button = buttons.get(target);
+            if (TouchInputModel.circle(x, y, button.x, button.y, button.radius * 1.5f)) bits = button.bit;
         }
-        pointerBits[id] = bits;
+        input.setButtons(id, bits);
         recompute();
     }
 
-    // Z held and A pressed is the game's long jump while Mario still runs and its crouch jump once the crouch has stopped
-    // him, about nine frames after Z. A thumb's slide takes longer than that, so a quick slide with the stick pushed lets
-    // go of Z on the way (Mario keeps running) and gives it back on the button it reaches, both at once: the long jump.
-    // Held on Z first, or standing still, the slide keeps Z all the way: the crouch jump.
-    private int slideFromZ(int id, int over, int overBits) {
-        if (over >= 0 && buttons.get(over).bit == Z) {
-            zLeft[id] = false;
-            return Z;
-        }
-        if (!zLeft[id]) {
-            zLeft[id] = true;
-            zQuick[id] = SystemClock.uptimeMillis() - zDownMs[id] <= Z_QUICK_SLIDE_MS && Math.hypot(stickX, stickY) > Z_QUICK_SLIDE_STICK;
-        }
-        return over >= 0 || !zQuick[id] ? overBits | Z : 0;
-    }
-
     private void recompute() {
-        int bits = 0;
-        for (int held : pointerBits) {
-            bits |= held;
-        }
+        final int bits = input.held();
         float sx = 0.0f;
         float sy = 0.0f;
         if (stickPointer >= 0) {
-            final float dx = (stickKnobX - stickBaseX) / stickRadius;
-            final float dy = (stickBaseY - stickKnobY) / stickRadius;
-            final float length = (float) Math.hypot(dx, dy);
-            if (length > STICK_DEAD_ZONE) {
-                // A radial dead zone, the rest of the travel to the rim rescaled to 0..1.
-                final float magnitude = (Math.min(length, 1.0f) - STICK_DEAD_ZONE) / (1.0f - STICK_DEAD_ZONE);
-                sx = dx / length * magnitude;
-                sy = dy / length * magnitude;
-            }
+            TouchInputModel.stick(stickKnobX - stickBaseX, stickBaseY - stickKnobY, stickRadius, STICK_DEAD_ZONE, stickValue);
+            sx = stickValue[0];
+            sy = stickValue[1];
         }
         publish(bits, sx, sy);
     }
@@ -735,6 +747,7 @@ final class TouchControlsView extends View {
         int best = -1;
         float bestDistance = Float.MAX_VALUE;
         for (int i = 0; i < buttons.size(); ++i) {
+            if (!pointerScreen && !visibleButton(i)) continue;
             if (pointerScreen && i != HOME_BUTTON) {
                 continue;
             }
@@ -751,20 +764,35 @@ final class TouchControlsView extends View {
 
     // Eight directions: the arm under the finger, both arms on a diagonal.
     private int dpadBits(float x, float y) {
-        final float dx = x - dpadX;
-        final float dy = y - dpadY;
-        final double distance = Math.hypot(dx, dy);
-        if (distance < dpadRadius * 0.22f || distance > dpadRadius * 1.35f) {
-            return 0;
+        return TouchInputModel.dpad(x - dpadX, y - dpadY, dpadRadius);
+    }
+
+    private boolean visibleButton(int index) { return index != 5 && index != 8 && index != 9; }
+
+    /** Release all roles, including a Wii pointer absent from the final MotionEvent. Safe to call repeatedly. */
+    void cancelTouches() {
+        removeCallbacks(cameraOptions);
+        for (int i = 0; i < MAX_POINTERS; ++i) {
+            if (input.role(i) == TARGET_POINTER) listener.onPointer(2, i, lastX[i], lastY[i]);
         }
-        final double angle = Math.toDegrees(Math.atan2(-dy, dx));
-        final double a = angle < 0 ? angle + 360.0 : angle;
-        int bits = 0;
-        if (a < 67.5 || a >= 292.5) bits |= RIGHT;
-        if (a >= 22.5 && a < 157.5) bits |= UP;
-        if (a >= 112.5 && a < 247.5) bits |= LEFT;
-        if (a >= 202.5 && a < 337.5) bits |= DOWN;
-        return bits;
+        input.clear();
+        stickPointer = -1;
+        dragPointer = okPointer = -1;
+        publish(0, 0, 0);
+        invalidate();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        cancelTouches();
+        if (cameraDialog != null) cameraDialog.dismiss();
+        super.onDetachedFromWindow();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        if (!hasFocus) cancelTouches();
+        super.onWindowFocusChanged(hasFocus);
     }
 
     @Override
@@ -783,11 +811,105 @@ final class TouchControlsView extends View {
             drawButton(canvas, home, (heldButtons & home.bit) != 0);
             return;
         }
-        for (Button button : buttons) {
-            drawButton(canvas, button, (heldButtons & button.bit) != 0);
+        for (int i = 0; i < buttons.size(); ++i) {
+            final Button button = buttons.get(i);
+            if (visibleButton(i)) drawButton(canvas, button, (heldButtons & button.bit) != 0);
         }
         drawDpad(canvas);
         drawStick(canvas);
+        if (!listener.titleScreen()) drawAimMode(canvas);
+    }
+
+    private void drawAimMode(Canvas canvas) {
+        fill.setColor(0xFF101D3C);
+        fill.setAlpha(alpha(0.7f));
+        canvas.drawRoundRect(aimMode, aimMode.height() / 2, aimMode.height() / 2, fill);
+        stroke.setColor(cameraMode ? 0xFFFFDB76 : 0xFF8CE8FF);
+        stroke.setAlpha(alpha(0.85f));
+        canvas.drawRoundRect(aimMode, aimMode.height() / 2, aimMode.height() / 2, stroke);
+        final float oldSize = text.getTextSize();
+        text.setTextSize(11 * dp * scale);
+        text.setColor(cameraMode ? 0xFFFFDB76 : 0xFFB5F0FF);
+        text.setAlpha(alpha(1));
+        text.getFontMetrics(fontMetrics);
+        final Paint.FontMetrics metrics = fontMetrics;
+        final boolean portuguese = "pt".equals(getResources().getConfiguration().getLocales().get(0).getLanguage());
+        canvas.drawText(cameraMode ? (portuguese ? "CÂMERA ↔" : "CAM ↔") : (portuguese ? "PONTEIRO" : "POINTER"), aimMode.centerX(),
+                aimMode.centerY() - (metrics.ascent + metrics.descent) / 2, text);
+        text.setTextSize(oldSize);
+    }
+
+    /** These settings apply to D-pad camera gestures only. Wii pointer coordinates are always passed through. */
+    void applyCameraSettings(float sensitivity, boolean invertX, boolean invertY) {
+        cancelTouches();
+        cameraSettings = new TouchLayouts.CameraSettings(sensitivity, invertX, invertY);
+        layouts.saveCamera(cameraSettings);
+    }
+
+    private void openCameraSettings() {
+        if (cameraDialog != null) return;
+        final int finger = input.owner(TARGET_MODE);
+        if (finger < 0 || !input.isTap(finger, 24 * dp)) return;
+        cancelTouches(); // The long press is consumed; releasing it must not toggle or leak into the Wii pointer.
+        if (haptics) performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        final boolean pt = "pt".equals(getResources().getConfiguration().getLocales().get(0).getLanguage());
+        final LinearLayout content = new LinearLayout(getContext());
+        content.setOrientation(LinearLayout.VERTICAL);
+        final int padding = Math.round(20 * dp);
+        content.setPadding(padding, padding / 2, padding, 0);
+        final TextView explanation = new TextView(getContext());
+        explanation.setText(pt
+                ? "O arrasto envia passos do direcional, não órbita analógica. Maior sensibilidade reduz a distância mínima. O ponteiro Wii não muda. O jogo fica pausado enquanto esta janela está aberta."
+                : "Dragging sends D-pad camera steps, not analog orbit. Higher sensitivity reduces the minimum drag distance. The Wii pointer is unchanged. The game is paused while this window is open.");
+        content.addView(explanation);
+        final TextView distance = new TextView(getContext());
+        distance.setPadding(0, Math.round(14 * dp), 0, 0);
+        content.addView(distance);
+        final SeekBar sensitivity = new SeekBar(getContext());
+        sensitivity.setMax(165);
+        sensitivity.setProgress(Math.round((cameraSettings.sensitivity - 0.35f) * 100));
+        content.addView(sensitivity);
+        final CheckBox invertX = new CheckBox(getContext());
+        invertX.setText(pt ? "Inverter horizontal (X)" : "Invert horizontal (X)");
+        invertX.setChecked(cameraSettings.invertX);
+        content.addView(invertX);
+        final CheckBox invertY = new CheckBox(getContext());
+        invertY.setText(pt ? "Inverter vertical (Y)" : "Invert vertical (Y)");
+        invertY.setChecked(cameraSettings.invertY);
+        content.addView(invertY);
+        final Runnable updateDistance = () -> {
+            final TouchLayouts.CameraSettings setting = new TouchLayouts.CameraSettings(0.35f + sensitivity.getProgress() / 100.0f, false, false);
+            distance.setText(String.format(pt ? java.util.Locale.forLanguageTag("pt-BR") : java.util.Locale.US,
+                    pt ? "Sensibilidade: %.2f× · distância mínima: %.1f dp" : "Sensitivity: %.2f× · minimum distance: %.1f dp",
+                    setting.sensitivity, setting.thresholdDp()));
+        };
+        sensitivity.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(SeekBar bar, int value, boolean fromUser) { updateDistance.run(); }
+            public void onStartTrackingTouch(SeekBar bar) { }
+            public void onStopTrackingTouch(SeekBar bar) { }
+        });
+        updateDistance.run();
+        final AlertDialog dialog = new AlertDialog.Builder(getContext())
+                .setTitle(pt ? "Câmera por gestos" : "Camera gestures")
+                .setView(content)
+                .setNegativeButton(pt ? "Cancelar" : "Cancel", null)
+                .setNeutralButton(pt ? "Padrão" : "Reset", (window, which) -> applyCameraSettings(1, false, false))
+                .setPositiveButton(pt ? "Salvar" : "Save", (window, which) ->
+                        applyCameraSettings(0.35f + sensitivity.getProgress() / 100.0f, invertX.isChecked(), invertY.isChecked()))
+                .create();
+        cameraDialog = dialog;
+        dialog.setOnDismissListener(window -> {
+            cameraDialog = null;
+            listener.cameraDialogChanged(false);
+        });
+        listener.cameraDialogChanged(true);
+        try {
+            dialog.show();
+        } catch (RuntimeException error) {
+            cameraDialog = null;
+            listener.cameraDialogChanged(false);
+            throw error;
+        }
     }
 
     private int alpha(float value) {
@@ -799,11 +921,20 @@ final class TouchControlsView extends View {
         fill.setColor(held ? 0xFFFFFFFF : 0xFF0A0C1C);
         fill.setAlpha(alpha(held ? 0.42f : 0.38f));
         canvas.drawCircle(button.x, button.y, r, fill);
-        stroke.setColor(0xFFFFFFFF);
+        stroke.setColor(button.bit == A ? 0xFF8CE8FF : button.bit == SHAKE ? 0xFFFFDB76
+                : button.bit == B ? 0xFFD4ADFF : 0xFFE3EDFF);
         stroke.setAlpha(alpha(held ? 0.95f : 0.62f));
         canvas.drawCircle(button.x, button.y, r, stroke);
         final int ink = held ? 0xFF0A0C1C : 0xFFFFFFFF;
-        if (button.spinIcon) {
+        if (button.bit == B) {
+            drawStarBit(canvas, button.x, button.y - r * 0.15f, r * 0.44f, ink);
+            text.setColor(ink);
+            text.setAlpha(alpha(0.95f));
+            final float size = text.getTextSize();
+            text.setTextSize(r * 0.42f);
+            canvas.drawText("B", button.x, button.y + r * 0.72f, text);
+            text.setTextSize(size);
+        } else if (button.spinIcon) {
             drawSpin(canvas, button.x, button.y, r * 0.5f, ink);
         } else if (button.homeIcon) {
             drawHome(canvas, button.x, button.y, r * 0.48f, ink);
@@ -812,10 +943,26 @@ final class TouchControlsView extends View {
             text.setAlpha(alpha(0.95f));
             final float size = text.getTextSize();
             text.setTextSize(Math.min(size, r * (button.label.length() > 1 ? 0.7f : 0.95f)));
-            final Paint.FontMetrics metrics = text.getFontMetrics();
+            text.getFontMetrics(fontMetrics);
+            final Paint.FontMetrics metrics = fontMetrics;
             canvas.drawText(button.label, button.x, button.y - (metrics.ascent + metrics.descent) / 2.0f, text);
             text.setTextSize(size);
         }
+    }
+
+    private void drawStarBit(Canvas canvas, float x, float y, float radius, int ink) {
+        path.reset();
+        for (int i = 0; i < 10; ++i) {
+            final double angle = -Math.PI / 2 + i * Math.PI / 5;
+            final float r = (i & 1) == 0 ? radius : radius * 0.46f;
+            final float px = x + (float)Math.cos(angle) * r;
+            final float py = y + (float)Math.sin(angle) * r;
+            if (i == 0) path.moveTo(px, py); else path.lineTo(px, py);
+        }
+        path.close();
+        fill.setColor(ink);
+        fill.setAlpha(alpha(0.95f));
+        canvas.drawPath(path, fill);
     }
 
     // Two arrows chasing round a circle: the shake that spins.

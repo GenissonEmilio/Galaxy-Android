@@ -68,6 +68,8 @@ public class GameActivity extends SDLActivity implements SensorEventListener {
     private boolean menuOpen;
     private String controlsMode = "auto";
     private boolean controlsWanted = true;   // the player's choice in the HOME Menu
+    private boolean foreground;
+    private boolean cameraDialogOpen;
 
     @Override
     protected String[] getLibraries() {
@@ -138,6 +140,11 @@ public class GameActivity extends SDLActivity implements SensorEventListener {
         } catch (ErrnoException e) {
             Log.e(TAG, "NEBULA_DATA_DIR not set", e);
         }
+        try {
+            AndroidRenderProfile.ensureFirstConfig(GameFiles.renderConfig(this));
+        } catch (java.io.IOException e) {
+            Log.e(TAG, "First-run graphics profile could not be saved", e);
+        }
         GameFiles.lastError(this).delete();
         super.onCreate(savedInstanceState);
         if (mBrokenLibraries || mLayout == null) {
@@ -149,15 +156,23 @@ public class GameActivity extends SDLActivity implements SensorEventListener {
         final SharedPreferences prefs = GameFiles.controls(this);
         controls = new TouchControlsView(this, new TouchControlsView.Listener() {
             @Override
+            public void touchStarted() {
+                revealControls();
+            }
+
+            @Override
+            public void cameraDialogChanged(boolean open) {
+                cameraDialogOpen = open;
+                applyNativeVisibility();
+            }
+
+            @Override
             public void onControls(int buttons, float stickX, float stickY) {
                 nativeTouchControls(buttons, stickX, stickY);
             }
 
             @Override
             public void onPointer(int action, int id, float x, float y) {
-                if (action == 0) {
-                    revealControls();
-                }
                 nativePointer(action, id, x, y);
             }
 
@@ -220,6 +235,7 @@ public class GameActivity extends SDLActivity implements SensorEventListener {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus && controls != null) controls.cancelTouches();
         if (hasFocus) {
             // The whole display for the picture; the bars come back with a swipe from the edge.
             final WindowInsetsController insets = getWindow().getInsetsController();
@@ -234,8 +250,9 @@ public class GameActivity extends SDLActivity implements SensorEventListener {
     @Override
     protected void onStart() {
         super.onStart();
+        foreground = true;
         if (!mBrokenLibraries) {
-            nativeSetVisible(true);
+            applyNativeVisibility();
             listenToPhoneMotion(true);
         }
     }
@@ -287,11 +304,23 @@ public class GameActivity extends SDLActivity implements SensorEventListener {
 
     @Override
     protected void onStop() {
+        foreground = false;
+        if (controls != null) controls.cancelTouches();
         if (!mBrokenLibraries) {
             listenToPhoneMotion(false);
-            nativeSetVisible(false);
+            applyNativeVisibility();
         }
         super.onStop();
+    }
+
+    private void applyNativeVisibility() {
+        if (!mBrokenLibraries) nativeSetVisible(foreground && !cameraDialogOpen);
+    }
+
+    @Override
+    protected void onPause() {
+        if (controls != null) controls.cancelTouches();
+        super.onPause();
     }
 
     @Override
@@ -418,7 +447,7 @@ public class GameActivity extends SDLActivity implements SensorEventListener {
     }
 
     private static boolean isController(InputDevice device) {
-        if (device == null || device.isVirtual()) {
+        if (device == null || device.isVirtual() || !device.isExternal()) {
             return false;
         }
         final int sources = device.getSources();

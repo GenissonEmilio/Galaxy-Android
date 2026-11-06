@@ -89,25 +89,36 @@ data class GraphicsSettings(
     val fsr: Boolean,       // upscaler "fsr" (FSR 1) rather than "bilinear"
     val sharpness: Int,     // RCAS, 0-100
     val hudAtScreen: Boolean,  // hud_output_resolution: menus and HUD drawn at the screen's resolution
+    val spatialQuality: Int,   // spatial_quality: 0 native, 1 quality (1.5x), then the runtime's other modes
 ) {
     companion object {
-        // The runtime's defaults: VSYNC on, 60 fps (displayRate: the display's own rate, frames in between drawn
-        // from the game's motion), no anti-aliasing, bilinear enlarging, no sharpening.
-        val Default = GraphicsSettings(
-            vsync = true, displayRate = false, aa = "off", msaa = 1, fsr = false,
-            sharpness = 0, hudAtScreen = false,
+        // Android's first-run profile: 60 fps, a 1.5x spatial upscale, and native HUD/text.
+        val Quality = GraphicsSettings(
+            vsync = true, displayRate = false, aa = "off", msaa = 1, fsr = true,
+            sharpness = 0, hudAtScreen = true, spatialQuality = 1,
         )
+        val Native = Quality.copy(fsr = false, spatialQuality = 0)
+        val Default = Quality
+        private val spatialNames = listOf("manual", "quality", "balanced", "performance", "ultra_performance")
 
         fun read(context: Context): GraphicsSettings {
-            val values = readIni(GameFiles.renderConfig(context))
+            val file = GameFiles.renderConfig(context)
+            val values = readIni(file)
+            // Missing keys in an existing config follow the native runtime's defaults;
+            // the recommended profile is only the default when the whole file is absent.
+            val fallback = if (file.exists()) Native.copy(vsync = false, hudAtScreen = false) else Default
             return GraphicsSettings(
-                vsync = values["vsync_interval"]?.let { it != "0" } ?: Default.vsync,
-                displayRate = values["max_fps"]?.toFloatOrNull()?.let { it == 0f } ?: Default.displayRate,
-                aa = values["aa"]?.takeIf { it == "fxaa" || it == "smaa" } ?: Default.aa,
-                msaa = values["msaa_samples"]?.toIntOrNull()?.let { if (it >= 4) 4 else if (it >= 2) 2 else 1 } ?: Default.msaa,
-                fsr = values["upscaler"]?.let { it == "fsr" } ?: Default.fsr,
-                sharpness = values["sharpness"]?.toIntOrNull()?.coerceIn(0, 100) ?: Default.sharpness,
-                hudAtScreen = values["hud_output_resolution"]?.let { it == "1" } ?: Default.hudAtScreen,
+                vsync = values["vsync_interval"]?.let { it != "0" } ?: fallback.vsync,
+                displayRate = values["max_fps"]?.toFloatOrNull()?.let { it == 0f } ?: fallback.displayRate,
+                aa = values["aa"]?.takeIf { it == "fxaa" || it == "smaa" } ?: fallback.aa,
+                msaa = values["msaa_samples"]?.toIntOrNull()?.let { if (it >= 4) 4 else if (it >= 2) 2 else 1 } ?: fallback.msaa,
+                fsr = values["upscaler"]?.let { it == "fsr" } ?: fallback.fsr,
+                sharpness = values["sharpness"]?.toIntOrNull()?.coerceIn(0, 100) ?: fallback.sharpness,
+                hudAtScreen = values["hud_output_resolution"]?.let { it == "1" } ?: fallback.hudAtScreen,
+                spatialQuality = values["spatial_quality"]?.let { name ->
+                    spatialNames.indexOf(name).takeIf { it >= 0 }
+                        ?: name.toIntOrNull()?.takeIf { it in 0..4 }
+                } ?: fallback.spatialQuality,
             )
         }
 
@@ -135,6 +146,7 @@ data class GraphicsSettings(
         values["upscaler"] = if (fsr) "fsr" else "bilinear"
         values["sharpness"] = sharpness.toString()
         values["hud_output_resolution"] = if (hudAtScreen) "1" else "0"
+        values["spatial_quality"] = spatialNames[spatialQuality.coerceIn(0, 4)]
         file.parentFile?.mkdirs()
         val temporary = File(file.parentFile, ".config.ini.writing")
         temporary.writeText(values.entries.joinToString("\n", postfix = "\n") { "${it.key}=${it.value}" })

@@ -57,11 +57,11 @@
 #include "galaxy/pointer_control.h"
 #include "galaxy/achievements.h"
 #include "galaxy/stats.h"
+#include "galaxy/input/wiimote_motion.h"
 #if defined(_WIN32) && !defined(NEBULA_HOST_SDL)
 // A real Wii Remote over Windows HID (wiimote_hid.h).
 #define NEBULA_REAL_WIIMOTE 1
 #include "galaxy/input/wiimote_input.h"
-#include "galaxy/input/wiimote_motion.h"
 #include "galaxy/wiimote_hid.h"
 #endif
 #include "galaxy/runtime_settings.h"

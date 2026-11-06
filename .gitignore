@@ -18,3 +18,16 @@
 *.log
 *.tmp
 *.gxdump
+# Android port: private game data and local build artifacts
+*.iso
+*.rvz
+*.wbfs
+*.dol
+*.pak
+*.sav
+*.gci
+*.jks
+*.keystore
+*.log
+local.properties
+artifacts/

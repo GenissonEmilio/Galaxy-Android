@@ -280,6 +280,10 @@ public:
     [[nodiscard]] UploadRing& index_ring() noexcept { return index_ring_; }
     [[nodiscard]] UploadRing& constant_ring() noexcept { return constant_ring_; }
     [[nodiscard]] UploadRing& matrix_ring() noexcept { return matrix_ring_; }
+    // A descriptor's storage-buffer offset can need stricter alignment than a float4 row.
+    [[nodiscard]] std::size_t matrix_table_alignment() const noexcept {
+        return std::max<std::size_t>(16u, vk::Context::get().properties().limits.minStorageBufferOffsetAlignment);
+    }
     [[nodiscard]] unsigned frame_slot() const noexcept { return frame_slot_; }
     void bind_draw_tables(gpu::Table, gpu::Table) noexcept {}
     [[nodiscard]] gpu::Table sampler_table_for(const std::array<SamplerKey, kSamplerTableSlots>& keys, unsigned count);

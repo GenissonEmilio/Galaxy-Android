@@ -467,6 +467,7 @@ public:
     [[nodiscard]] UploadRing& index_ring() { return index_ring_; }
     [[nodiscard]] UploadRing& constant_ring() { return constant_ring_; }
     [[nodiscard]] UploadRing& matrix_ring() { return matrix_ring_; }
+    [[nodiscard]] std::size_t matrix_table_alignment() const noexcept { return 16u; }
     [[nodiscard]] unsigned frame_slot() const { return frame_slot_; }
     // Bytes held by the scene target-copy destination cache. Destinations are allocated at the
     // internal resolution, so this grows with the frame's area against a fixed budget.

@@ -14,25 +14,33 @@ param(
     [Parameter(Mandatory = $true)][string]$HostTools,
     [string]$SeedTool = "",
     [string]$Signing = "",
-    [string]$Abis = "arm64-v8a,x86_64",
+    [string]$Abis = "arm64-v8a",
     [string]$FfxShaders = "",
+    [string]$NdkVersion = "30.0.16248370",
+    [int]$Jobs = 4,
+    [switch]$WithoutFsr3,
     [switch]$TestHooks
 )
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path
 $android = Join-Path $root "platform\android"
 $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { Join-Path $env:LOCALAPPDATA "Android\Sdk" }
-$ndk = Join-Path $sdk "ndk\28.2.13676358"
+$ndk = Join-Path $sdk "ndk\$NdkVersion"
 $toolchain = (Join-Path $ndk "build\cmake\android.toolchain.cmake") -replace '\\', '/'
 $llvm = Join-Path $ndk "toolchains\llvm\prebuilt\windows-x86_64\bin"
-if (-not (Test-Path $toolchain)) { throw "NDK 28.2.13676358 not found under $sdk" }
-$vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-$cmakeDir = Join-Path $vs "Common7\IDE\CommonExtensions\Microsoft\CMake"
-$env:PATH = "$cmakeDir\CMake\bin;$cmakeDir\Ninja;$env:PATH"
+if (-not (Test-Path $toolchain)) { throw "NDK $NdkVersion not found under $sdk" }
+if ($Jobs -lt 1) { throw "Jobs must be positive" }
+# The SDK supplies both tools; building Android does not require Visual Studio.
+$sdkCmake = Join-Path $sdk "cmake\3.31.6\bin"
+if (Test-Path (Join-Path $sdkCmake "cmake.exe")) { $env:PATH = "$sdkCmake;$env:PATH" }
+if (-not (Get-Command cmake -ErrorAction SilentlyContinue) -or -not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+    throw "CMake and Ninja must be on PATH, or install SDK cmake;3.31.6"
+}
 $depsSlash = $Deps -replace '\\', '/'
 $hostToolsSlash = $HostTools -replace '\\', '/'
 # FidelityFX's source when it is here already (downloaded and checked otherwise), its shaders likewise.
 $ffxArgs = @()
+if ($WithoutFsr3) { $ffxArgs += "-DNEBULA_FSR3=OFF" }
 if (Test-Path "$Deps\ffx-src\FidelityFX-SDK-1.1.4\sdk") { $ffxArgs += "-DFETCHCONTENT_SOURCE_DIR_FIDELITYFX_SDK=$depsSlash/ffx-src/FidelityFX-SDK-1.1.4" }
 if ($FfxShaders) { $ffxArgs += "-DNEBULA_FFX_VK_SHADERS=$($FfxShaders -replace '\\', '/')" }
 New-Item -ItemType Directory -Force $Work | Out-Null
@@ -62,13 +70,13 @@ foreach ($abi in $Abis -split ",") {
     Invoke-Logged "$Work\module-$abi.log" {
         cmake -G Ninja -S "$root/native" -B $module "-DCMAKE_TOOLCHAIN_FILE=$toolchain" "-DANDROID_ABI=$abi" `
             "-DANDROID_PLATFORM=android-31" -DCMAKE_BUILD_TYPE=Release "-DNEBULA_PETARI_DIR=$root/native/petari" $releaseFlag
-        if ($LASTEXITCODE -eq 0) { cmake --build $module --target smg_game }
+        if ($LASTEXITCODE -eq 0) { cmake --build $module --target smg_game -j $Jobs }
     }
     $hostBuild = "$Work/host-$abi" -replace '\\', '/'
     Invoke-Logged "$Work\host-$abi.log" {
         cmake -G Ninja -S "$root/platform/sdl" -B $hostBuild "-DCMAKE_TOOLCHAIN_FILE=$toolchain" "-DANDROID_ABI=$abi" `
             "-DANDROID_PLATFORM=android-31" -DCMAKE_BUILD_TYPE=Release "-DNEBULA_DEPS=$depsSlash" "-DNEBULA_HOST_TOOLS=$hostToolsSlash" $releaseFlag @ffxArgs
-        if ($LASTEXITCODE -eq 0) { cmake --build $hostBuild --target main }
+        if ($LASTEXITCODE -eq 0) { cmake --build $hostBuild --target main -j $Jobs }
     }
     $upper = ($triple -replace '-', '_').ToUpper()
     $lower = $triple -replace '-', '_'

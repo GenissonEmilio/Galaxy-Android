@@ -106,17 +106,17 @@ const ARCHIVE_DEPTH_MAX: usize = 8;
 
 /// One source file as the store holds it: itself cooked, or, an archive, a folder of its members cooked, side by side.
 pub fn cook_entry(name: &str, bytes: Vec<u8>, stats: &mut Stats) -> Result<Vec<StoreItem>> {
-    cook_entry_at(name, bytes, 0, stats)
+    cook_entry_at(name, bytes, 0, stats, &programs::Written::unknown())
 }
 
-fn cook_entry_at(name: &str, bytes: Vec<u8>, depth: usize, stats: &mut Stats) -> Result<Vec<StoreItem>> {
+fn cook_entry_at(name: &str, bytes: Vec<u8>, depth: usize, stats: &mut Stats, written: &programs::Written) -> Result<Vec<StoreItem>> {
     let mut bytes = bytes;
     if archive::is_compressed(&bytes) {
         bytes = archive::expand(&bytes).with_context(|| format!("{name} cannot be expanded"))?;
         stats.expanded_files += 1;
     }
     if !archive::is_archive(&bytes) {
-        let cooked = cook_file(name, bytes.clone(), stats)?.unwrap_or(bytes);
+        let cooked = cook_file_with_written(name, bytes.clone(), stats, written)?.unwrap_or(bytes);
         return Ok(vec![StoreItem { path: String::new(), order: 0, bytes: Some(cooked) }]);
     }
     if depth >= ARCHIVE_DEPTH_MAX {
@@ -128,7 +128,7 @@ fn cook_entry_at(name: &str, bytes: Vec<u8>, depth: usize, stats: &mut Stats) ->
         if tool_leftover(file) {
             continue;
         }
-        for item in cook_entry_at(&format!("{name}/{file}"), member.bytes, depth + 1, stats)? {
+        for item in cook_entry_at(&format!("{name}/{file}"), member.bytes, depth + 1, stats, written)? {
             let path = if item.path.is_empty() { member.path.clone() } else { format!("{}/{}", member.path, item.path) };
             items.push(StoreItem { path, order: member.offset, bytes: item.bytes });
         }
@@ -168,6 +168,10 @@ fn place(pak: &mut File, at: &mut u64, path: &str, items: Vec<StoreItem>, stats:
 
 /// One file cooked: Some(new bytes), or None when it stays as it is. An archive is not one file (cook_entry).
 pub fn cook_file(name: &str, bytes: Vec<u8>, stats: &mut Stats) -> Result<Option<Vec<u8>>> {
+    cook_file_with_written(name, bytes, stats, &programs::Written::unknown())
+}
+
+fn cook_file_with_written(name: &str, bytes: Vec<u8>, stats: &mut Stats, written: &programs::Written) -> Result<Option<Vec<u8>>> {
     let mut changed = false;
     let mut bytes = bytes;
     if archive::is_compressed(&bytes) {
@@ -183,7 +187,7 @@ pub fn cook_file(name: &str, bytes: Vec<u8>, stats: &mut Stats) -> Result<Option
         let ir = model_ir::read_file(&bytes, source, stats).with_context(|| format!("{name}: model"))?;
         let stem = name.rsplit('/').next().unwrap_or(name);
         let stem = stem.split('.').next().unwrap_or(stem);
-        Some(model_write::write(&ir, stem, &programs::written_or_unknown()).with_context(|| format!("{name}: native model"))?)
+        Some(model_write::write(&ir, stem, written).with_context(|| format!("{name}: native model"))?)
     } else if native_data::is_animation_file(&bytes) {
         Some(clip::write(&clip::read(&bytes).with_context(|| format!("{name}: animation"))?))
     } else if bytes.starts_with(b"JPAC2-10") {
@@ -317,13 +321,22 @@ pub fn write_cooked_pak(
     stats: &mut Stats,
 ) -> Result<u64> {
     let files = pak_files(system.fst())?;
-    let total: u64 = files.iter().map(|f| f.length).sum();
+    // Both direct partition imports (CLI/JNI) and format-1 migration must use
+    // the same complete BRK ranges as the program-set generator. Keep this
+    // context local: another import in this process can have different clips.
+    let source_total: u64 = files.iter().map(|f| f.length).sum();
+    let mut prepass_total = 0;
+    let written = programs::prepare_written(&files, read, &mut |done, total| {
+        prepass_total = total;
+        progress(done, total + source_total)
+    })?;
+    let total = source_total + prepass_total;
     let mut pak = File::create(output).with_context(|| format!("{} cannot be created", output.display()))?;
     pak.write_all(&[0u8; store::HEADER as usize])?;
     let mut at = store::HEADER.div_ceil(ALIGN) * ALIGN;
     let mut placed = Vec::with_capacity(files.len());
-    let mut done = 0u64;
-    if !progress(0, total) {
+    let mut done = prepass_total;
+    if !progress(done, total) {
         bail!("the import was cancelled");
     }
     // AW files have no header: the audio archive's wave systems say where their waves lie.
@@ -346,7 +359,7 @@ pub fn write_cooked_pak(
         stats.bytes_in += file.length;
         // Whatever its name, a compressed file is expanded here: the game has no decompressor.
         let items = if cooks(&file.path) || archive::is_compressed(&bytes) {
-            cook_entry(&file.path, bytes, stats)?
+            cook_entry_at(&file.path, bytes, 0, stats, &written)?
         } else if let Some(places) = waves.get(&audio_data::wave_archive_key(&file.path)) {
             stats.cooked_files += 1;
             let cooked = audio_data::wave_archive(&bytes, places).with_context(|| format!("{}: wave archive", file.path))?;
@@ -434,7 +447,6 @@ pub fn cook_content(input: &Path, output: &Path, progress: &mut dyn FnMut(u64, u
     if output.exists() {
         bail!("{} already exists", output.display());
     }
-    programs::prepare_written(input)?;
     let source = input.join("game.pak");
     let mut pak = File::open(&source).with_context(|| format!("{} cannot be opened", source.display()))?;
     let system = pak_system_area(&mut pak)?;

@@ -841,6 +841,8 @@ impl Partition {
             Ok(bytes)
         };
         let mut stats = cook::Stats::default();
+        // The shared cooker first collects every BRK through this source reader,
+        // before generating model hashes; CLI and JNI use this same path.
         let result = cook::write_cooked_pak(&system, &mut read, &temporary, progress, &mut stats);
         let size = match result {
             Ok(size) => size,
@@ -1178,6 +1180,177 @@ mod tests {
         assert_eq!(read("LayoutData/FileSelect.arc"), b"archive");
         assert_eq!(read("NebulaData/StoryProgressTable.bcsv").len(), 0x1E0);
         assert!(cook::cook_content(&old, &output, &mut |_, _| true).unwrap_err().to_string().contains("already exists"));
+    }
+
+    fn synthetic_word(out: &mut [u8], at: usize, value: u32) {
+        out[at..at + 4].copy_from_slice(&value.to_be_bytes());
+    }
+
+    /// A source BMD with one real TEV stage reading register 0; no game data.
+    fn register_model() -> Vec<u8> {
+        let mut blocks = Vec::new();
+        for (tag, size) in [(b"INF1", 0x20), (b"VTX1", 0x40), (b"EVP1", 0x1c),
+                            (b"DRW1", 0x14), (b"JNT1", 0x18), (b"SHP1", 0x2c)] {
+            let mut block = vec![0; size];
+            block[..4].copy_from_slice(tag);
+            synthetic_word(&mut block, 4, size as u32);
+            if tag == b"INF1" { synthetic_word(&mut block, 0x14, 0x18); }
+            blocks.push(block);
+        }
+        let mut mat = vec![0; 0x2a0];
+        mat[..4].copy_from_slice(b"MAT3");
+        let size = mat.len() as u32;
+        synthetic_word(&mut mat, 4, size);
+        mat[8..10].copy_from_slice(&1u16.to_be_bytes());
+        for (field, at) in [(0x0c, 0x100), (0x10, 0x250), (0x14, 0x252),
+                            (0x58, 0x270), (0x5c, 0x280)] {
+            synthetic_word(&mut mat, field, at);
+        }
+        mat[0x100..0x24c].fill(255); // absent optional material tables
+        mat[0x100] = 1;
+        mat[0x104] = 0; // stage count index
+        mat[0x1e4..0x1e6].fill(0); // TEV stage index
+        mat[0x252..0x25c].copy_from_slice(&[0,1,255,255,0,0,0,8,b'm',0]);
+        mat[0x270] = 1;
+        // lerp(r0.rgb, 0, 1); alpha also reads r0 before any write.
+        mat[0x280..0x294].copy_from_slice(&[0,2,15,12,15,0,0,0,1,0,1,7,6,7,0,0,0,1,0,0]);
+        blocks.push(mat);
+        let mut out = vec![0; 32];
+        out[..8].copy_from_slice(b"J3D2bmd3");
+        synthetic_word(&mut out, 12, blocks.len() as u32);
+        for block in blocks { out.extend(block); }
+        let size = out.len() as u32;
+        synthetic_word(&mut out, 8, size);
+        out
+    }
+
+    fn register_clip(value: i16) -> Vec<u8> {
+        let mut block = vec![0; 0xe0];
+        block[..4].copy_from_slice(b"TRK1");
+        synthetic_word(&mut block, 4, 0xe0);
+        block[0xc..0xe].copy_from_slice(&1u16.to_be_bytes());
+        synthetic_word(&mut block, 0x20, 0x60); // one register target
+        synthetic_word(&mut block, 0x28, 0x80); // material remap, index 0
+        synthetic_word(&mut block, 0x30, 0x84); // name table
+        block[0x84..0x8e].copy_from_slice(&[0,1,255,255,0,0,0,8,b'm',0]);
+        for k in 0..4 {
+            block[0x10 + k*2..0x12 + k*2].copy_from_slice(&1u16.to_be_bytes());
+            synthetic_word(&mut block, 0x38 + k*4, (0xc0 + k*2) as u32);
+            block[0x60 + k*6..0x62 + k*6].copy_from_slice(&1u16.to_be_bytes());
+            block[0xc0 + k*2..0xc2 + k*2].copy_from_slice(&value.to_be_bytes());
+        }
+        let mut out = vec![0; 32];
+        out[..8].copy_from_slice(b"J3D1brk1");
+        out.extend(block);
+        out
+    }
+
+    fn one_member_archive(name: &str, bytes: &[u8]) -> Vec<u8> {
+        let mut out = vec![0; 0x100];
+        out[..4].copy_from_slice(b"RARC");
+        for (at, value) in [(0x0c, 0xe0), (0x20, 1), (0x24, 0x20),
+                            (0x28, 1), (0x2c, 0x30), (0x34, 0x50)] {
+            synthetic_word(&mut out, at, value);
+        }
+        out[0x4a..0x4c].copy_from_slice(&1u16.to_be_bytes());
+        synthetic_word(&mut out, 0x54, 0x0100_0000);
+        synthetic_word(&mut out, 0x5c, bytes.len() as u32);
+        out[0x70..0x70 + name.len()].copy_from_slice(name.as_bytes());
+        out.extend_from_slice(bytes);
+        out
+    }
+
+    fn animated_archive(value: i16) -> Vec<u8> {
+        let archive = one_member_archive("nested.arc", &one_member_archive("anim.brk", &register_clip(value)));
+        let mut yaz = b"Yaz0".to_vec();
+        yaz.extend_from_slice(&(archive.len() as u32).to_be_bytes());
+        yaz.extend_from_slice(&[0;8]);
+        for chunk in archive.chunks(8) {
+            yaz.push(255);
+            yaz.extend_from_slice(chunk);
+        }
+        yaz
+    }
+
+    fn first_program_pair(model: &[u8]) -> (u64, u64) {
+        let word = |at| u32::from_le_bytes(model[at..at+4].try_into().unwrap()) as usize;
+        let material = word(24 * 4);
+        let form = word(material + cook::model_write::MATERIAL_BYTES - 4);
+        (u64::from_le_bytes(model[form..form+8].try_into().unwrap()),
+         u64::from_le_bytes(model[form+8..form+16].try_into().unwrap()))
+    }
+
+    #[test]
+    fn direct_import_and_migration_use_animation_ranges_and_match_program_set() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = register_model();
+        let ir = cook::model_ir::read_file(&model, cook::model_ir::Source::Bmd, &mut cook::Stats::default()).unwrap();
+        let unknown = cook::model_write::write(&ir, "model", &cook::programs::Written::unknown()).unwrap();
+        let mut previous = None;
+        // Different ranges in the same process must not reuse a OnceLock's first import.
+        for (run, value) in [64, 1024, 64].into_iter().enumerate() {
+            let animation = animated_archive(value);
+            let files = [("model.bmd", 0x21000, model.as_slice()), ("animation.szs", 0x22000, animation.as_slice())];
+            let mut partition = table_partition(&directory.path().join(format!("data-{run}")), &files);
+            let old = directory.path().join(format!("raw-{run}"));
+            partition.write_pak(&old.join("game.pak"), &mut |_,_| true).unwrap();
+            let direct = directory.path().join(format!("direct-{run}"));
+            let mut progress = Vec::new();
+            partition.write_content(&direct, &mut |done,total| { progress.push((done,total)); true }).unwrap();
+            assert!(progress.windows(2).all(|p| p[0].0 <= p[1].0 && p[0].1 == p[1].1));
+            assert_eq!(progress.last().unwrap().0, progress.last().unwrap().1);
+            let migrated = directory.path().join(format!("migrated-{run}"));
+            cook::cook_content(&old, &migrated, &mut |_,_| true).unwrap();
+            let cooked = cook::store::read_file(&direct.join("game.pak"), "model.bmd").unwrap();
+            assert_eq!(cooked, cook::store::read_file(&migrated.join("game.pak"), "model.bmd").unwrap());
+            let pair = first_program_pair(&cooked);
+            let programs = directory.path().join(format!("programs-{run}"));
+            cook::programs::write_set(&old, &programs).unwrap();
+            let pixel = fs::read_to_string(programs.join(format!("p{:016x}.hlsl", pair.1))).unwrap();
+            assert_eq!(pixel.contains("low8(r0.rgb)"), value > 255);
+            assert!(programs.join(format!("v{:016x}.hlsl", pair.0)).exists());
+            if value == 64 {
+                assert_ne!(pair.1, first_program_pair(&unknown).1, "missing prepass adds low8 and changes the pixel hash");
+                if let Some(previous) = previous { assert_eq!(pair, previous); }
+                previous = Some(pair);
+            } else {
+                assert_ne!(pair, previous.unwrap(), "BRK ranges must affect cooked shader hashes");
+            }
+        }
+    }
+
+    #[test]
+    fn direct_import_prepass_failure_and_cancellation_preserve_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("game.pak");
+        fs::write(&output, b"known good").unwrap();
+        let model = register_model();
+        let animation = animated_archive(64);
+        let mut partition = table_partition(&directory.path().join("data"),
+            &[("model.bmd", 0x21000, &model), ("animation.szs", 0x22000, &animation)]);
+        // Cancel after the first prepass source, before creating the temporary output.
+        let error = partition.write_cooked_pak(&output, &mut |done,_| done == 0).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        let mut malformed = one_member_archive("broken.brk", b"bad");
+        malformed.resize(animation.len(), 0);
+        fs::write(directory.path().join("data/files/animation.szs"), malformed).unwrap();
+        let error = partition.write_cooked_pak(&output, &mut |_,_| true).unwrap_err();
+        assert!(format!("{error:#}").contains("/animation.szs/broken.brk"));
+        assert_eq!(fs::read(&output).unwrap(), b"known good");
+        assert!(!directory.path().join(".game.pak.importing").exists());
+        let content = directory.path().join("cancelled-content");
+        assert!(partition.write_content(&content, &mut |_,_| false).is_err());
+        assert!(!content.exists());
+        fs::write(directory.path().join("data/files/animation.szs"), &animation).unwrap();
+        // All source files are surveyed in this fixture, so half of progress is
+        // prepass I/O. Cancel in the write pass with an existing good output.
+        let error = partition.write_cooked_pak(&output, &mut |done,total| done <= total / 2).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(fs::read(&output).unwrap(), b"known good");
+        assert!(!directory.path().join(".game.pak.importing").exists());
+        partition.write_cooked_pak(&output, &mut |_,_| true).unwrap();
+        assert!(cook::store::read_file(&output, "model.bmd").is_ok(), "success replaces the old output");
+        assert!(!directory.path().join(".game.pak.importing").exists());
     }
 
     #[test]

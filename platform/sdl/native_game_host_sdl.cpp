@@ -484,9 +484,9 @@ in::PlayerInput native_game_input(std::uint64_t frame, std::int32_t star_pointer
     return snapshot;
 }
 
-void native_game_rumble(bool motor_on, std::int32_t) noexcept {
+void native_game_rumble(std::uint8_t strength, std::int32_t) noexcept {
     if (g_rumble_pad != 0) {
-        sdl::rumble(g_rumble_pad, motor_on ? g_rumble_strength : 0.0f);
+        sdl::rumble(g_rumble_pad, g_rumble_strength * static_cast<float>(strength) / 255.0f);
     }
 }
 

@@ -611,6 +611,9 @@ bool Context::initialize(bool prefer_integrated, bool validation, std::vector<co
                  "anisotropy=%d display-timing=%d\n",
                  geometry_shader_, depth_clamp_, depth_clip_enable_, bc_textures_,
                  sampler_anisotropy_, display_timing_);
+    std::fprintf(stderr, "[vulkan] buffer alignment: storage=%llu uniform=%llu\n",
+                 static_cast<unsigned long long>(properties_.limits.minStorageBufferOffsetAlignment),
+                 static_cast<unsigned long long>(properties_.limits.minUniformBufferOffsetAlignment));
     // The memory BufferPlace chooses from: each heap's size (L: device-local), each type's heap and flags (L device
     // local, V host visible, C coherent, $ cached).
     {

@@ -144,14 +144,14 @@ private fun WelcomeScreen(onChoose: () -> Unit) {
         Gap(24.dp)
         Mark(132.dp)
         Gap(8.dp)
-        Text("Nebula", style = MaterialTheme.typography.displayMedium)
+        Text("Galaxy Android", style = MaterialTheme.typography.displayMedium)
         Gap(8.dp)
         Lead("Super Mario Galaxy, running natively on this device.")
         Gap(32.dp)
         GlassCard(Modifier.fillMaxWidth()) {
             Step(1, "Choose your disc image", "The copy you made of your own Wii disc: ISO, RVZ, WIA, WBFS, CISO or GCZ.")
             Gap(18.dp)
-            Step(2, "Nebula sets the game up", "It copies the game into its own storage (about 3.9 GB). The disc image is only read.")
+            Step(2, "Galaxy Android sets the game up", "It copies the game into its own storage (about 3.9 GB). The disc image is only read.")
             Gap(18.dp)
             Step(3, "Play", "With the touch controls, or a controller.")
         }
@@ -284,7 +284,7 @@ private fun ImportScreen(model: LauncherModel, onPlay: () -> Unit) {
                 }
                 Gap(12.dp)
                 Text(
-                    "You can leave Nebula meanwhile: setup carries on, with its progress in the notifications.",
+                    "You can leave Galaxy Android meanwhile: setup carries on, with its progress in the notifications.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = Night.TextFaint,
                     textAlign = TextAlign.Center,
@@ -351,7 +351,7 @@ private fun HomeScreen(model: LauncherModel, onPlay: () -> Unit) {
                 GlassCard(Modifier.fillMaxWidth(), padding = androidx.compose.foundation.layout.PaddingValues(vertical = 6.dp)) {
                     NavigationRow(Icons.Rounded.Tune, "Settings", "Touch controls, storage") { model.screen = Screen.Settings }
                     HorizontalDivider(color = Night.GlassEdge, modifier = Modifier.padding(horizontal = 20.dp))
-                    NavigationRow(Icons.Rounded.Info, "About Nebula", "Version ${BuildConfig.VERSION_NAME}, licenses") { model.screen = Screen.About }
+                    NavigationRow(Icons.Rounded.Info, "About Galaxy Android", "Version ${BuildConfig.VERSION_NAME}, licenses") { model.screen = Screen.About }
                 }
             }
         }
@@ -416,17 +416,54 @@ private fun controllerNames(): List<String> = InputDevice.getDeviceIds().toList(
     val sources = device.sources
     val pad = (sources and InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
         (sources and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
-    if (pad && !device.isVirtual) device.name else null
+    if (pad && !device.isVirtual && device.isExternal) device.name else null
 }.distinct()
 
 @Composable
 private fun SettingsScreen(model: LauncherModel, onChoose: () -> Unit, onShareLog: () -> Unit) {
     var confirmRemove by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    // The game's HOME settings can change config.ini while the launcher stays alive.
+    var graphics by remember { mutableStateOf(GraphicsSettings.read(context)) }
     val controls = model.controls
     Column(Modifier.fillMaxSize()) {
         TopBar("Settings") { model.back() }
         Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), contentAlignment = Alignment.TopCenter) {
             Column(Modifier.widthIn(max = 680.dp).fillMaxWidth().padding(bottom = 32.dp)) {
+                SectionTitle("Graphics")
+                Text(
+                    "Applies the next time you open the game.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Night.TextDim,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                )
+                GlassCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp), padding = androidx.compose.foundation.layout.PaddingValues(vertical = 4.dp)) {
+                    ChoiceRow(
+                        "Quality (1.5×)",
+                        "Recommended · FSR 1, sharp HUD and text, 60 fps",
+                        graphics == GraphicsSettings.Quality,
+                    ) {
+                        graphics = GraphicsSettings.Quality
+                        model.updateGraphics(graphics)
+                    }
+                    HorizontalDivider(color = Night.GlassEdge, modifier = Modifier.padding(horizontal = 20.dp))
+                    ChoiceRow(
+                        "Native",
+                        "Full screen resolution · higher GPU load, 60 fps",
+                        graphics == GraphicsSettings.Native,
+                    ) {
+                        graphics = GraphicsSettings.Native
+                        model.updateGraphics(graphics)
+                    }
+                    if (graphics != GraphicsSettings.Quality && graphics != GraphicsSettings.Native) {
+                        Text(
+                            "Current: custom settings",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Night.TextDim,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                        )
+                    }
+                }
                 SectionTitle("Storage")
                 GlassCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp), padding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)) {
                     val install = model.install
@@ -489,11 +526,11 @@ private fun AboutScreen(model: LauncherModel) {
         TopBar("About") { model.back() }
         Page {
             Mark(112.dp)
-            Text("Nebula", style = MaterialTheme.typography.headlineMedium)
+            Text("Galaxy Android", style = MaterialTheme.typography.headlineMedium)
             Text("Version ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodyMedium, color = Night.TextDim)
             Gap(20.dp)
             Lead(
-                "Nebula runs Super Mario Galaxy natively: the game's code is Petari's decompilation, compiled for this " +
+                "This Android fork builds on Nebula and Petari's decompilation, compiled natively for this " +
                     "device, drawing with Vulkan. The game's files come from " +
                     "your own disc. Nebula is not affiliated with or endorsed by Nintendo.",
             )

@@ -1,3 +1,10 @@
+# Galaxy Android — development fork
+
+Android ARM64 work based on Nebula's native Petari core. See the
+[Android port guide and validation status](docs/ANDROID_PORT.md) for controls,
+build instructions and what has actually been tested. This is an independent
+development fork; original Nebula documentation and credits follow below.
+
 # Nebula
 
 Nebula runs **Super Mario Galaxy** natively on Windows. You need your own copy of the game.

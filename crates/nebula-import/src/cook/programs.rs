@@ -1188,24 +1188,47 @@ pub fn input_code(input: &Input) -> u8 {
     }
 }
 
-/// What the game's own animations write, once the store's cook has walked them. Unset (a mod's conversion): anything.
-pub static WRITTEN: std::sync::OnceLock<Written> = std::sync::OnceLock::new();
-
+/// A standalone conversion has no whole-game animation prepass. Imports pass
+/// their own Written explicitly, so standalone mods remain conservative even
+/// after an import in the same process.
 pub fn written_or_unknown() -> Written {
-    WRITTEN.get().cloned().unwrap_or_else(Written::unknown)
+    Written::unknown()
 }
 
-/// Every animation that can write a register, for the store's whole cook.
-pub fn prepare_written(input: &Path) -> Result<()> {
+/// Collect every register animation before any model is cooked, using the same
+/// archive walk as program-set generation. Cancellation never publishes ranges.
+pub fn prepare_written(
+    files: &[super::PakFile],
+    read: &mut dyn FnMut(&super::PakFile) -> Result<Vec<u8>>,
+    progress: &mut dyn FnMut(u64, u64) -> bool,
+) -> Result<Written> {
+    let total = files.iter().filter(|f| range_source(&f.path)).map(|f| f.length).sum();
+    let mut done = 0;
+    if !progress(0, total) {
+        anyhow::bail!("the import was cancelled");
+    }
     let mut written = Written::default();
-    walk_files(input, &mut |name, bytes| {
-        if name.to_ascii_lowercase().ends_with(".brk") {
-            written.add(&clip::read(&bytes).with_context(|| name.to_string())?);
+    let mut order: Vec<_> = files.iter().filter(|f| range_source(&f.path)).collect();
+    order.sort_by_key(|f| f.offset);
+    for file in order {
+        let bytes = read(file)?;
+        if bytes.len() as u64 != file.length {
+            anyhow::bail!("{} is {} bytes, not the file table's {}", file.path, bytes.len(), file.length);
         }
-        Ok(())
-    })?;
-    let _ = WRITTEN.set(written);
-    Ok(())
+        walk_source(&format!("/{}", file.path), bytes, 0, &mut |name, bytes| {
+            if name.to_ascii_lowercase().ends_with(".brk") {
+                written.add(&clip::read(&bytes).with_context(|| name.to_string())?);
+            }
+            Ok(())
+        }, &mut || {
+            if progress(done, total) { Ok(()) } else { anyhow::bail!("the import was cancelled") }
+        })?;
+        done += file.length;
+        if !progress(done, total) {
+            anyhow::bail!("the import was cancelled");
+        }
+    }
+    Ok(written)
 }
 
 /// A mod's conversion: the texts its models name, by file name (`v<hash>.hlsl`, `p<hash>.hlsl`), which the host builds when
@@ -1444,33 +1467,45 @@ impl Written {
     }
 }
 
-fn walk_files(input: &Path, visit: &mut dyn FnMut(&str, Vec<u8>) -> Result<()>) -> Result<()> {
-    fn walk(name: &str, bytes: Vec<u8>, visit: &mut dyn FnMut(&str, Vec<u8>) -> Result<()>) -> Result<()> {
-        let mut bytes = bytes;
-        if archive::is_compressed(&bytes) {
-            bytes = archive::expand(&bytes)?;
-        }
-        if archive::is_archive(&bytes) {
-            for member in archive::members(&bytes)? {
-                let file = member.path.rsplit('/').next().unwrap_or(&member.path);
-                walk(&format!("{name}/{file}"), member.bytes, visit)?;
-            }
-            return Ok(());
-        }
-        visit(name, bytes)
+fn range_source(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".arc", ".szs", ".bdl", ".bmd", ".brk"].iter().any(|ext| lower.ends_with(ext))
+}
+
+fn walk_source(
+    name: &str,
+    mut bytes: Vec<u8>,
+    depth: usize,
+    visit: &mut dyn FnMut(&str, Vec<u8>) -> Result<()>,
+    check_cancelled: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    check_cancelled()?;
+    if archive::is_compressed(&bytes) {
+        bytes = archive::expand(&bytes).with_context(|| format!("{name} cannot be expanded"))?;
     }
+    if archive::is_archive(&bytes) {
+        if depth >= super::ARCHIVE_DEPTH_MAX {
+            anyhow::bail!("{name}: archives inside archives more than {} deep", super::ARCHIVE_DEPTH_MAX);
+        }
+        for member in archive::members(&bytes).with_context(|| format!("{name}: archive"))? {
+            let file = member.path.rsplit('/').next().unwrap_or(&member.path);
+            walk_source(&format!("{name}/{file}"), member.bytes, depth + 1, visit, check_cancelled)?;
+        }
+        return Ok(());
+    }
+    visit(name, bytes)
+}
+
+fn walk_files(input: &Path, visit: &mut dyn FnMut(&str, Vec<u8>) -> Result<()>) -> Result<()> {
     let source = input.join("game.pak");
     let mut pak = File::open(&source).with_context(|| format!("{} cannot be opened", source.display()))?;
     let system = pak_system_area(&mut pak)?;
     for file in pak_files(system.fst())? {
-        let lower = file.path.to_ascii_lowercase();
-        if !(lower.ends_with(".arc") || lower.ends_with(".szs") || lower.ends_with(".bdl") || lower.ends_with(".bmd") || lower.ends_with(".brk")) {
-            continue;
-        }
+        if !range_source(&file.path) { continue; }
         let mut bytes = vec![0u8; file.length as usize];
         pak.seek(SeekFrom::Start(file.offset))?;
         pak.read_exact(&mut bytes)?;
-        walk(&format!("/{}", file.path), bytes, visit)?;
+        walk_source(&format!("/{}", file.path), bytes, 0, visit, &mut || Ok(()))?;
     }
     Ok(())
 }

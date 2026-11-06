@@ -22,14 +22,15 @@ val signing = providers.gradleProperty("nebula.signing").orNull?.let { path ->
 android {
     namespace = "dev.nebula.galaxy"
     compileSdk = 36
-    ndkVersion = "28.2.13676358"
+    ndkVersion = "30.0.16248370"
 
     defaultConfig {
-        applicationId = "dev.nebula.galaxy"
+        applicationId = providers.gradleProperty("galaxyApplicationId").orElse("com.genisson.galaxy.android").get()
+        testInstrumentationRunner = "dev.nebula.galaxy.TouchControlsInstrumentation"
         minSdk = 31
         targetSdk = 36
-        versionCode = 13
-        versionName = "2.0.0-test3"
+        versionCode = 1
+        versionName = "0.1.0-dev"
         ndk {
             abiFilters += ((project.findProperty("nebulaAbis") as String?) ?: "arm64-v8a").split(",")
         }

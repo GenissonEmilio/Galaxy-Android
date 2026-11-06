@@ -2061,7 +2061,9 @@ void RenderCore::begin_walk_frame(ListEntry& entry) {
     // The complete native list is available before begin_frame can resize a
     // ring. Include all eye/world rows, even rows a particular program omits.
     const NebulaFrameList& list = *entry.data.list;
-    std::size_t matrix_bytes = std::size_t{list.item_count} * 16u + 32u;
+    // Two 16-byte tails, row alignment, and the table descriptor's device alignment.
+    std::size_t matrix_bytes = std::size_t{list.item_count} * 16u + 32u + 15u +
+                               renderer_.matrix_table_alignment() - 1u;
     for (std::uint32_t b = 0; b < list.block_count; ++b) {
         const auto& block = list.blocks[b];
         std::size_t matrices = block.joint_count;

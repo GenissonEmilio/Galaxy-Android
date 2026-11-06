@@ -4,7 +4,6 @@
 
 #include "galaxy/frame_timeline.h"
 #include "galaxy/loss_report.h"
-#include "galaxy/render/game_bloom.h"
 #include "galaxy/render/render_config.h"
 #include "render/core/inspector.h"
 
@@ -244,7 +243,10 @@ void RenderCore::prepare_walk(ListData& now, ListData* before, const WalkTime& t
     now.rows_walk = walk_.serial;
 
     // The instance table: one entry per item, in draw order.
-    const UploadRing::Allocation instances = matrix_ring.allocate(std::size_t{list.item_count} * 16u + 16u, 16u);
+    // Unlike the rows (bound from offset zero and indexed by base), this table's
+    // allocation is itself a storage-buffer descriptor offset on Vulkan.
+    const UploadRing::Allocation instances = matrix_ring.allocate(std::size_t{list.item_count} * 16u + 16u,
+                                                                 renderer_.matrix_table_alignment());
     walk_.instances = instances.gpu;
     {
         auto* out = reinterpret_cast<std::uint32_t*>(instances.cpu);

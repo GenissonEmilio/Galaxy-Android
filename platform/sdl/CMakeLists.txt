@@ -60,9 +60,13 @@ if(NOT IS_DIRECTORY "${NEBULA_HOST_TOOLS}")
     message(FATAL_ERROR "Set NEBULA_HOST_TOOLS to the Windows Vulkan build folder")
 endif()
 add_executable(galaxy_native_spirv IMPORTED)
-set_target_properties(galaxy_native_spirv PROPERTIES IMPORTED_LOCATION "${NEBULA_HOST_TOOLS}/galaxy_native_spirv${CMAKE_HOST_EXECUTABLE_SUFFIX}")
+set(nebula_host_executable_suffix "")
+if(CMAKE_HOST_WIN32)
+    set(nebula_host_executable_suffix ".exe")
+endif()
+set_target_properties(galaxy_native_spirv PROPERTIES IMPORTED_LOCATION "${NEBULA_HOST_TOOLS}/galaxy_native_spirv${nebula_host_executable_suffix}")
 add_executable(galaxy_utility_spirv IMPORTED)
-set_target_properties(galaxy_utility_spirv PROPERTIES IMPORTED_LOCATION "${NEBULA_HOST_TOOLS}/galaxy_utility_spirv${CMAKE_HOST_EXECUTABLE_SUFFIX}")
+set_target_properties(galaxy_utility_spirv PROPERTIES IMPORTED_LOCATION "${NEBULA_HOST_TOOLS}/galaxy_utility_spirv${nebula_host_executable_suffix}")
 include("${nebula_root}/cmake/native_materials.cmake")
 galaxy_program_blob(galaxy_programs_spirv spirv)
 set(galaxy_utility_spirv_dir "${CMAKE_CURRENT_BINARY_DIR}/generated/utility_spirv")
@@ -137,6 +141,8 @@ add_library(galaxy_render_vk STATIC
     ${rt}/input_bindings.cpp
     ${rt}/host_pointer_events.cpp
     ${rt}/native_input.cpp
+    ${rt}/input/wiimote_input.cpp
+    ${rt}/input/wiimote_motion.cpp
     ${rt}/pointer_control.cpp
     ${rt}/rumble.cpp
     ${rt}/switch_controller.cpp

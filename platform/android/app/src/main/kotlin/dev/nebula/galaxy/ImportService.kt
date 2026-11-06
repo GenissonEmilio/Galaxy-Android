@@ -101,7 +101,10 @@ class ImportService : Service() {
         val manager = getSystemService(NotificationManager::class.java)
         try {
             val output = GameFiles.pak(this)
-            Storage.removeGame(this)
+            // The importer replaces its temporary output only after success. Keep a previous game intact
+            // if validation, conversion or cancellation fails; saves live in a separate directory.
+            val directory = output.parentFile ?: throw IllegalStateException("the game directory is missing")
+            check(directory.isDirectory || directory.mkdirs()) { "the game directory could not be created" }
             val descriptor = contentResolver.openFileDescriptor(uri, "r")
                 ?: throw IllegalStateException("the disc image could not be opened")
             val started = SystemClock.elapsedRealtime()
