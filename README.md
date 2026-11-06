@@ -5,6 +5,8 @@ controles multitoque, ponteiro Wii e câmera por gestos. Repositório próprio:
 [GenissonEmilio/Galaxy-Android](https://github.com/GenissonEmilio/Galaxy-Android).
 
 - Android 12/API 31+, ARM64 e Vulkan 1.1.
+- [Baixar a pré-release Android 0.1.0-dev](https://github.com/GenissonEmilio/Galaxy-Android/releases/tag/v0.1.0-dev)
+  — APK assinado, relatório de validação e SHA-256.
 - [Controles, importação e compilação](docs/ANDROID_PORT.md).
 - [Validação 0.1.0-dev: testes, gráficos, performance e limites](docs/ANDROID_VALIDATION_0.1.0.md).
 - A fase inicial foi testada no aparelho; a campanha completa ainda não foi validada.
