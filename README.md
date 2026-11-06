@@ -1,9 +1,22 @@
-# Galaxy Android — development fork
+# Galaxy Android
 
-Android ARM64 work based on Nebula's native Petari core. See the
-[Android port guide and validation status](docs/ANDROID_PORT.md) for controls,
-build instructions and what has actually been tested. This is an independent
-development fork; original Nebula documentation and credits follow below.
+Port nativo experimental de **Super Mario Galaxy para Android ARM64/Vulkan**, com
+controles multitoque, ponteiro Wii e câmera por gestos. Repositório próprio:
+[GenissonEmilio/Galaxy-Android](https://github.com/GenissonEmilio/Galaxy-Android).
+
+- Android 12/API 31+, ARM64 e Vulkan 1.1.
+- [Controles, importação e compilação](docs/ANDROID_PORT.md).
+- [Validação 0.1.0-dev: testes, gráficos, performance e limites](docs/ANDROID_VALIDATION_0.1.0.md).
+- A fase inicial foi testada no aparelho; a campanha completa ainda não foi validada.
+- Cada jogador fornece uma imagem compatível do próprio jogo. O código não inclui
+  imagens de disco, arquivos extraídos, saves ou chaves de assinatura.
+
+Baseado no host Android do [Nebula](https://github.com/keepvaibin/nebula) e em seu
+núcleo adaptado de [Petari](https://github.com/SMGCommunity/Petari). O histórico,
+os créditos e as licenças originais foram preservados. Este projeto é independente
+e não é uma publicação oficial desses projetos ou da Nintendo.
+
+A documentação original do Nebula segue abaixo e descreve também sua versão Windows.
 
 # Nebula
 
